@@ -597,5 +597,8 @@ demo = gr.Interface(
 if __name__ == "__main__":
     os.environ["MASTER_ADDR"]='127.0.0.1'
     os.environ["MASTER_PORT"]='8675'
+    #os.environ["PYOPENGL_PLATFORM"]='egl'
+    #os.environ["EGL_DEVICE_ID"]='1'
     #os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
     demo.launch(share=True)
+    #demo.launch(share=True, server_name='0.0.0.0', server_port=8501)
