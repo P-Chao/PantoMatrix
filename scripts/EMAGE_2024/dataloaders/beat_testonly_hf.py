@@ -271,6 +271,8 @@ class CustomDataset(Dataset):
                 from numpy.lib import stride_tricks
                 frame_length = 1024
                 # hop_length = 512
+                if audio_each_file.shape[-1] == 1:
+                    audio_each_file = audio_each_file[..., 0]
                 shape = (audio_each_file.shape[-1] - frame_length + 1, frame_length)
                 strides = (audio_each_file.strides[-1], audio_each_file.strides[-1])
                 rolling_view = stride_tricks.as_strided(audio_each_file, shape=shape, strides=strides)
