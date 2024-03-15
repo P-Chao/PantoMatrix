@@ -16,6 +16,150 @@ from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
 import cv2
 
+from scipy.io import loadmat
+
+# dreampose
+# dense pose iuv: pip install git+https://github.com/facebookresearch/detectron2@main#subdirectory=projects/DensePose
+from detectron2.config import CfgNode, get_cfg
+from detectron2.data.detection_utils import read_image
+from detectron2.engine.defaults import DefaultPredictor
+from detectron2.structures.instances import Instances
+from detectron2.utils.logger import setup_logger
+
+from densepose import add_densepose_config
+from densepose.structures import DensePoseChartPredictorOutput, DensePoseEmbeddingPredictorOutput
+from densepose.utils.logger import verbosity_to_level
+from densepose.vis.base import CompoundVisualizer
+from densepose.vis.bounding_box import ScoredBoundingBoxVisualizer
+from densepose.vis.densepose_outputs_vertex import (
+    DensePoseOutputsTextureVisualizer,
+    DensePoseOutputsVertexVisualizer,
+    get_texture_atlases,
+)
+from densepose.vis.densepose_results import (
+    DensePoseResultsContourVisualizer,
+    DensePoseResultsFineSegmentationVisualizer,
+    DensePoseResultsUVisualizer,
+    DensePoseResultsVVisualizer,
+)
+from densepose.vis.densepose_results_textures import (
+    DensePoseResultsVisualizerWithTexture,
+    get_texture_atlas,
+)
+from densepose.vis.extractor import (
+    CompoundExtractor,
+    DensePoseOutputsExtractor,
+    DensePoseResultExtractor,
+    create_extractor,
+)
+
+from typing import Any, Dict, List
+
+from types import SimpleNamespace
+
+
+def setup_config(config_fpath: str, model_fpath: str, args, opts: List[str]):
+    cfg = get_cfg()
+    add_densepose_config(cfg)
+    cfg.merge_from_file(config_fpath)
+    cfg.merge_from_list(args.opts)
+    if opts:
+        cfg.merge_from_list(opts)
+    cfg.MODEL.WEIGHTS = model_fpath
+    cfg.freeze()
+    return cfg
+
+
+def create_context(args, cfg: CfgNode) -> Dict[str, Any]:
+    VISUALIZERS = {
+        "dp_contour": DensePoseResultsContourVisualizer,
+        "dp_segm": DensePoseResultsFineSegmentationVisualizer,
+        "dp_u": DensePoseResultsUVisualizer,
+        "dp_v": DensePoseResultsVVisualizer,
+        "dp_iuv_texture": DensePoseResultsVisualizerWithTexture,
+        "dp_cse_texture": DensePoseOutputsTextureVisualizer,
+        "dp_vertex": DensePoseOutputsVertexVisualizer,
+        "bbox": ScoredBoundingBoxVisualizer,
+    }
+
+    vis_specs = ['dp_segm'] #args.visualizations.split(",")
+    visualizers = []
+    extractors = []
+    for vis_spec in vis_specs:
+        texture_atlas = get_texture_atlas(args.texture_atlas)
+        texture_atlases_dict = get_texture_atlases(args.texture_atlases_map)
+        vis = VISUALIZERS[vis_spec](
+            cfg=cfg,
+            texture_atlas=texture_atlas,
+            texture_atlases_dict=texture_atlases_dict,
+        )
+        visualizers.append(vis)
+        extractor = create_extractor(vis)
+        extractors.append(extractor)
+    visualizer = CompoundVisualizer(visualizers)
+    extractor = CompoundExtractor(extractors)
+    context = {
+        "extractor": extractor,
+        "visualizer": visualizer,
+    }
+    return context
+
+
+'''
+image: BGR
+config and pkl file download from detectron2 repo
+'''
+def densepose_iuv(image):
+    args = SimpleNamespace()
+    args.cfg = './densepose/configs/densepose_rcnn_R_50_FPN_s1x.yaml'
+    args.min_score = 0.8
+    args.model = './densepose/model_final_162be9.pkl'
+    args.nms_thresh = None
+    args.opts = []
+    args.texture_atlas = None
+    args.texture_atlases_map = None
+    args.verbosity = 1
+
+    #inference
+    opts = []
+    cfg = setup_config(args.cfg, args.model, args, opts)
+    context = create_context(args, cfg)
+    predictor = DefaultPredictor(cfg)
+
+    with torch.no_grad():
+        outputs = predictor(image)['instances']
+        if 'pred_densepose' in outputs._fields.keys():
+            uv = outputs._fields['pred_densepose']
+
+        visualizer = context["visualizer"]
+        extractor = context["extractor"]
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        image = np.tile(image[:, :, np.newaxis], [1, 1, 3])
+        data = extractor(outputs)
+
+        dd = data[0][0]
+        dp = data[0][1]
+        segs = len(dd)
+
+        img_label = np.zeros((image.shape[0], image.shape[1]))
+        img_uv = np.zeros((image.shape[0], image.shape[1], 2))
+        for i in range(segs):
+            seg = dd[i]
+            pos = dp.cpu().numpy()[i,:]
+            xs = int(pos[0])
+            xe = xs + int(pos[2])
+            ys = int(pos[1])
+            ye = ys + int(pos[3])
+            labels = seg.labels.cpu().numpy()
+            uv = seg.uv.cpu().numpy().transpose((1,2,0))
+            img_label[ys:ye,xs:xe] = labels
+            img_uv[ys:ye,xs:xe,:] = uv
+
+        image_vis = visualizer.visualize(image, data)
+
+    return image_vis, img_label, img_uv
+
+
 def write_wav_names_to_csv(folder_path, csv_path):
     """
     Traverse a folder and write the base names of all .wav files to a CSV file.
@@ -483,15 +627,15 @@ def process_frame(i, vertices_all, vertices1_all, faces, output_dir, filenames):
         return degrees * np.pi / 180
     
     uniform_color = [220, 220, 220, 255]
-    resolution = (1000, 1000)
-    figsize = (10, 10)
+    resolution = (1000, 1200)
+    figsize = (10, 12)
     
     fig, axs = plt.subplots(
         nrows=1, 
-        ncols=2, 
-        figsize=(figsize[0] * 2, figsize[1] * 1)
+        ncols=1,
+        figsize=(figsize[0] * 1, figsize[1] * 1)
     )
-    axs = axs.flatten()
+    #axs = axs.flatten()
 
     vertices = vertices_all[i]
     vertices1 = vertices1_all[i]
@@ -503,8 +647,8 @@ def process_frame(i, vertices_all, vertices1_all, faces, output_dir, filenames):
     #print(vertices.shape)
     angle_rad = deg_to_rad(-2)
     pose_camera = np.array([
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, np.cos(angle_rad), -np.sin(angle_rad), 1.0],
+        [1.0, 0.0, 0.0, 0.1],
+        [0.0, np.cos(angle_rad), -np.sin(angle_rad), 1.1],
         [0.0, np.sin(angle_rad), np.cos(angle_rad), 5.0],
         [0.0, 0.0, 0.0, 1.0]
     ])
@@ -515,15 +659,17 @@ def process_frame(i, vertices_all, vertices1_all, faces, output_dir, filenames):
         [0.0, np.sin(angle_rad), np.cos(angle_rad), 3.0],
         [0.0, 0.0, 0.0, 1.0]
     ])
-    
-    for vtx_idx, vtx in enumerate([vertices, vertices1]):
+
+    #for vtx_idx, vtx in enumerate([vertices, vertices1]):
+    for vtx_idx, vtx in enumerate([vertices]):
         trimesh_mesh = trimesh.Trimesh(
             vertices=vtx,
             faces=faces,
+            #face_colors=face_colors
             vertex_colors=uniform_color
         )
         mesh = pyrender.Mesh.from_trimesh(
-            trimesh_mesh, smooth=True
+            trimesh_mesh, smooth=False
         )
         scene = pyrender.Scene()
         scene.add(mesh)
@@ -533,12 +679,23 @@ def process_frame(i, vertices_all, vertices1_all, faces, output_dir, filenames):
         scene.add(light, pose=pose_light)
         renderer = pyrender.OffscreenRenderer(*resolution)
         color, _ = renderer.render(scene)
-        axs[vtx_idx].imshow(color)
-        axs[vtx_idx].axis('off')
+        plt.imshow(color)
+        plt.axis('off')
         renderer.delete()
             
     plt.savefig(filename, bbox_inches='tight')
     plt.close(fig)
+
+    image = cv2.imread(filename)
+    image_vis, label, uv = densepose_iuv(image)
+    save_folder = './result/poses'
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+    np.save(os.path.join(save_folder, f'frame_{i//3}_densepose.npy'), uv.transpose((2, 0, 1)).astype(np.float64))
+    save_folder = './result/images'
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+    cv2.imwrite(os.path.join(save_folder, f'frame_{i//3}_densepose.png'), image_vis)
 
 def generate_images(frames, vertices_all, vertices1_all, faces, output_dir, filenames):
     import multiprocessing
@@ -621,29 +778,16 @@ def render_one_sequence(
     import torch
     import moviepy.editor as mp
     import librosa
-    
-    model = smplx.create(model_folder, model_type=model_type,
-                         gender=gender, use_face_contour=use_face_contour,
-                         num_betas=num_betas,
-                         num_expression_coeffs=num_expression_coeffs,
-                         ext=ext, use_pca=False).cuda()
-    
-    #data_npz = np.load(f"{output_dir}{res_npz_path}.npz")
+
+    # data_npz = np.load(f"{output_dir}{res_npz_path}.npz")
     data_np_body = np.load(res_npz_path, allow_pickle=True)
     gt_np_body = np.load(gt_npz_path, allow_pickle=True)
-    
+
     if not os.path.exists(output_dir): os.makedirs(output_dir)
     filenames = []
-    # if not use_matplotlib:
-    #    import trimesh 
-       #import pyrender
-    from pyvirtualdisplay import Display
-    #'''
-    #display = Display(visible=0, size=(1000, 1000))
-    #display.start()
-    faces = np.load(f"{model_folder}/smplx/SMPLX_NEUTRAL_2020.npz", allow_pickle=True)["f"]
+
     seconds = 1
-    #data_npz["jaw_pose"].shape[0]
+    # data_npz["jaw_pose"].shape[0]
     n = data_np_body["poses"].shape[0]
     beta = torch.from_numpy(data_np_body["betas"]).to(torch.float32).unsqueeze(0).cuda()
     beta = beta.repeat(n, 1)
@@ -652,11 +796,28 @@ def render_one_sequence(
     pose = torch.from_numpy(data_np_body["poses"][:n]).to(torch.float32).cuda()
     transl = torch.from_numpy(data_np_body["trans"][:n]).to(torch.float32).cuda()
     # print(beta.shape, expression.shape, jaw_pose.shape, pose.shape, transl.shape, pose[:,:3].shape)
-    output = model(betas=beta, transl=transl, expression=expression, jaw_pose=jaw_pose,
-        global_orient=pose[:,:3], body_pose=pose[:,3:21*3+3], left_hand_pose=pose[:,25*3:40*3], right_hand_pose=pose[:,40*3:55*3],
-        leye_pose=pose[:, 69:72], 
-        reye_pose=pose[:, 72:75],
-        return_verts=True)
+
+    model_type = 'smpl'
+    if model_type == 'smplx':
+        model = smplx.create(model_folder, model_type=model_type,
+                            gender=gender, use_face_contour=use_face_contour,
+                            num_betas=num_betas,
+                            num_expression_coeffs=num_expression_coeffs,
+                            ext=ext, use_pca=False).cuda()
+        faces = np.load(f"{model_folder}/smplx/SMPLX_NEUTRAL_2020.npz", allow_pickle=True)["f"]
+        output = model(betas=beta, transl=transl, expression=expression, jaw_pose=jaw_pose,
+                       global_orient=pose[:, :3], body_pose=pose[:, 3:21 * 3 + 3],
+                       left_hand_pose=pose[:, 25 * 3:40 * 3], right_hand_pose=pose[:, 40 * 3:55 * 3],
+                       leye_pose=pose[:, 69:72],
+                       reye_pose=pose[:, 72:75],
+                       return_verts=True)
+    else:
+        model = smplx.create(model_folder, model_type='smpl', gender='MALE', use_face_contour=use_face_contour,
+                            num_betas=num_betas, num_expression_coeffs=num_expression_coeffs, ext='pkl', use_pca=False).cuda()
+        faces = model.faces
+        output = model(betas=beta, transl=transl,
+                         global_orient=pose[:, :3], body_pose=pose[:, 3:23 * 3 + 3],
+                         return_verts=True)
     vertices_all = output["vertices"].cpu().detach().numpy()
 
     beta1 = torch.from_numpy(gt_np_body["betas"]).to(torch.float32).unsqueeze(0).cuda()
@@ -664,114 +825,23 @@ def render_one_sequence(
     jaw_pose1 = torch.from_numpy(gt_np_body["poses"][:n,66:69]).to(torch.float32).cuda()
     pose1 = torch.from_numpy(gt_np_body["poses"][:n]).to(torch.float32).cuda()
     transl1 = torch.from_numpy(gt_np_body["trans"][:n]).to(torch.float32).cuda()
-    output1 = model(betas=beta1, transl=transl1, expression=expression1, jaw_pose=jaw_pose1, global_orient=pose1[:,:3], body_pose=pose1[:,3:21*3+3], left_hand_pose=pose1[:,25*3:40*3], right_hand_pose=pose1[:,40*3:55*3],      
-        leye_pose=pose1[:, 69:72], 
-        reye_pose=pose1[:, 72:75],return_verts=True)
+    if model_type == 'smplx':
+        output1 = model(betas=beta1, transl=transl1, expression=expression1, jaw_pose=jaw_pose1, global_orient=pose1[:,:3], body_pose=pose1[:,3:21*3+3], left_hand_pose=pose1[:,25*3:40*3], right_hand_pose=pose1[:,40*3:55*3],
+            leye_pose=pose1[:, 69:72],
+            reye_pose=pose1[:, 72:75],return_verts=True)
+    else:
+        output1 = model(betas=beta1, transl=transl1,
+                     global_orient=pose1[:,:3], body_pose=pose1[:,3:23*3+3],
+                     return_verts=True)
     vertices1_all = output1["vertices"].cpu().detach().numpy()
     if args.debug:
         seconds = 1
     else:
         seconds = vertices_all.shape[0]//30
-    # camera_settings = None    
-    time_s = time.time()
+    # camera_settings = None
     generate_images(int(seconds*10), vertices_all, vertices1_all, faces, output_dir, filenames)
     filenames = ["{}frame_{}.png".format(output_dir, i*3) for i in range(int(seconds*10))]  
-    # print(time.time()-time_s)
-    # for i in tqdm(range(seconds*10)):
-    #     vertices = vertices_all[i]
-    #     vertices1 = vertices1_all[i]
-    #     filename = f"{output_dir}frame_{i}.png"
-    #     filenames.append(filename)
-    #     #time_s = time.time()
-    #     #print(vertices.shape)
-    #     if use_matplotlib:
-    #         fig = plt.figure(figsize=(20, 10))
-    #         ax = fig.add_subplot(121, projection="3d")
-    #         fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    #         #ax.view_init(elev=0, azim=90)
-    #         x = vertices[:, 0]
-    #         y = vertices[:, 1]
-    #         z = vertices[:, 2]
-    #         ax.scatter(x, y, z, s=0.5)
-    #         ax.set_xlim([-1.0, 1.0])
-    #         ax.set_ylim([-0.5, 1.5])#heigth
-    #         ax.set_zlim([-0, 2])#depth
-    #         ax.set_box_aspect((1,1,1))
-    #     else:
-    #         mesh = trimesh.Trimesh(vertices, faces)
-    #         if i == 0:
-    #             scene = mesh.scene()
-    #             camera_params = {
-    #                 'fov': scene.camera.fov,
-    #                 'resolution': scene.camera.resolution,
-    #                 'focal': scene.camera.focal,
-    #                 'z_near': scene.camera.z_near,
-    #                 "z_far": scene.camera.z_far,
-    #                 'transform': scene.graph[scene.camera.name][0]
-    #             }
-    #         else: 
-    #             scene = mesh.scene()
-    #             scene.camera.fov = camera_params['fov']
-    #             scene.camera.resolution = camera_params['resolution']
-    #             scene.camera.z_near = camera_params['z_near']
-    #             scene.camera.z_far = camera_params['z_far']
-    #             scene.graph[scene.camera.name] = camera_params['transform']
-    #         fig, ax =plt.subplots(1,2, figsize=(16, 6))
-    #         image = scene.save_image(resolution=[640, 480], visible=False)
-    #         #print((time.time()-time_s))   
-    #         im0 = ax[0].imshow(image_from_bytes(image))
-    #         ax[0].axis('off')
 
-    #     # beta1 = torch.from_numpy(gt_np_body["betas"]).to(torch.float32).unsqueeze(0)
-    #     # expression1 = torch.from_numpy(gt_np_body["expressions"][i]).to(torch.float32).unsqueeze(0)
-    #     # jaw_pose1 = torch.from_numpy(gt_np_body["poses"][i][66:69]).to(torch.float32).unsqueeze(0)
-    #     # pose1 = torch.from_numpy(gt_np_body["poses"][i]).to(torch.float32).unsqueeze(0)
-    #     # transl1 = torch.from_numpy(gt_np_body["trans"][i]).to(torch.float32).unsqueeze(0)
-    #     # #print(beta.shape, expression.shape, jaw_pose.shape, pose.shape, transl.shape)global_orient=pose[0:1,:3],
-    #     # output1 = model(betas=beta1, transl=transl1, expression=expression1, jaw_pose=jaw_pose1, global_orient=pose1[0:1,:3], body_pose=pose1[0:1,3:21*3+3], left_hand_pose=pose1[0:1,25*3:40*3], right_hand_pose=pose1[0:1,40*3:55*3], return_verts=True)
-    #     # vertices1 = output1["vertices"].cpu().detach().numpy()[0]
-        
-    #     if use_matplotlib:
-    #         ax2 = fig.add_subplot(122, projection="3d")
-    #         ax2.set_box_aspect((1,1,1))
-    #         fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    #         #ax2.view_init(elev=0, azim=90)
-    #         x1 = vertices1[:, 0]
-    #         y1 = vertices1[:, 1]
-    #         z1 = vertices1[:, 2]
-    #         ax2.scatter(x1, y1, z1, s=0.5)
-    #         ax2.set_xlim([-1.0, 1.0])
-    #         ax2.set_ylim([-0.5, 1.5])#heigth
-    #         ax2.set_zlim([-0, 2])
-    #         plt.savefig(filename, bbox_inches='tight')
-    #         plt.close(fig)
-    #     else:
-    #         mesh1 = trimesh.Trimesh(vertices1, faces)
-    #         if i == 0:
-    #             scene1 = mesh1.scene()
-    #             camera_params1 = {
-    #                 'fov': scene1.camera.fov,
-    #                 'resolution': scene1.camera.resolution,
-    #                 'focal': scene1.camera.focal,
-    #                 'z_near': scene1.camera.z_near,
-    #                 "z_far": scene1.camera.z_far,
-    #                 'transform': scene1.graph[scene1.camera.name][0]
-    #             }
-    #         else: 
-    #             scene1 = mesh1.scene()
-    #             scene1.camera.fov = camera_params1['fov']
-    #             scene1.camera.resolution = camera_params1['resolution']
-    #             scene1.camera.z_near = camera_params1['z_near']
-    #             scene1.camera.z_far = camera_params1['z_far']
-    #             scene1.graph[scene1.camera.name] = camera_params1['transform']
-    #         image1 = scene1.save_image(resolution=[640, 480], visible=False)
-    #         im1 = ax[1].imshow(image_from_bytes(image1))
-    #         ax[1].axis('off')
-    #         plt.savefig(filename, bbox_inches='tight')
-    #         plt.close(fig)
-
-    #display.stop()
-    #'''
     # print(filenames)
     images = [imageio.imread(filename) for filename in filenames]
     imageio.mimsave(f"{output_dir}raw_{res_npz_path.split('/')[-1][:-4]}.mp4", images, fps=10)

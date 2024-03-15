@@ -18,6 +18,7 @@ conda activate emagepy38
 conda install -c conda-forge libstdcxx-ng
 # Install with pip:
 pip install -r ./scripts/EMAGE_2024/requirements.txt
+pip install git+https://github.com/facebookresearch/detectron2@main#subdirectory=projects/DensePose
 ```
 
 ## Download weights
@@ -26,6 +27,8 @@ You may run the following command to download weights:
 ```shell
 git lfs install
 git clone https://huggingface.co/H-Liu1997/EMAGE
+cd densepose
+wget https://dl.fbaipublicfiles.com/densepose/densepose_rcnn_R_50_FPN_s1x/165712039/model_final_162be9.pkl
 ```
 These weights should be orgnized as follows:
 
@@ -39,9 +42,15 @@ These weights should be orgnized as follows:
 |   `-- upper_vertex_1layer_710.bin
 |-- smplx_models
 |   `-- smplx/SMPLX_NEUTRAL_2020.npz
+|    -- smpl/SMPL_MALE.pkl
 |-- test_sequences
 `-- emage_240.bin
+<your root>/densepose/
+|-- config
+|-- model_final_162be9.pkl
 ```
+
+File `smpl/SMPL_MALE.pkl` could be manual down load from smpl website (300M version) 
 
 # 🚀 Training and Inference 
 

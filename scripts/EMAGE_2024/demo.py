@@ -574,12 +574,16 @@ def emage(smplx_path, audio_path, text_path):
     result = trainer.test_demo(999)
     return result
 
+#demo_root = '/mnt/d/Code/PantoMatrix'
+#demo_root = 'D:/Code/PantoMatrix'
+#demo_root = 'Code/PantoMatrix/EMAGE/test_sequences/smplxflame_30'
+
 demo = gr.Interface(
     emage,  # function
     inputs=[
-        gr.File(label="Please upload SMPL-X file with npz format here.", file_types=["npz", "NPZ"]),
-        gr.Audio(),
-        gr.File(label="Please upload textgrid format file here.", file_types=["TextGrid", "Textgrid", "textgrid"])
+        gr.File(label="Please upload SMPL-X file with npz format here.", file_types=["npz", "NPZ"], value='EMAGE/test_sequences/smplxflame_30/2_scott_0_1_1.npz'),
+        gr.Audio(value='EMAGE/test_sequences/wave16k/2_scott_0_1_1.wav'),
+        gr.File(label="Please upload textgrid format file here.", file_types=["TextGrid", "Textgrid", "textgrid"], value='EMAGE/test_sequences/textgrid/2_scott_0_1_1.TextGrid')
     ],  # input type
     outputs=gr.Video(format="mp4", visible=True),
     title='"EMAGE: Towards Unified Holistic Co-Speech Gesture Generation via Expressive Masked Audio Gesture Modeling" Demo',
